@@ -17,25 +17,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 _client = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
 
-def run(sql, params=None):
-    return _client.execute(sql, params or [])
-
+def run(sql, params=None): return _client.execute(sql, params or [])
 def query(sql, params=None):
     rs = _client.execute(sql, params or [])
     if not rs.columns: return []
     return [dict(zip(rs.columns, row)) for row in rs.rows]
-
 def query_one(sql, params=None):
-    rows = query(sql, params)
-    return rows[0] if rows else None
-
+    rows = query(sql, params); return rows[0] if rows else None
 def query_val(sql, params=None):
-    rs = _client.execute(sql, params or [])
-    return rs.rows[0][0] if rs.rows else None
-
+    rs = _client.execute(sql, params or []); return rs.rows[0][0] if rs.rows else None
 def now(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-# ━━━ INIT DB ━━━
 def init_db():
     tables = [
         "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT DEFAULT 'admin',created_at TEXT)",
@@ -49,7 +41,6 @@ def init_db():
     for t in tables:
         try: run(t)
         except: pass
-    # Add paiement column if missing
     try: run("ALTER TABLE commandes ADD COLUMN paiement TEXT DEFAULT 'Non payée'")
     except: pass
     if query_val("SELECT COUNT(*) FROM users") == 0:
@@ -62,9 +53,7 @@ def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
 def create_token(u): return jwt.encode({"sub":u,"exp":datetime.utcnow()+timedelta(days=30)},JWT_SECRET,algorithm="HS256")
 
 class LoginReq(BaseModel):
-    username: str
-    password: str
-
+    username: str; password: str
 @app.post("/api/login")
 def login(req: LoginReq):
     user = query_one("SELECT * FROM users WHERE username=? AND password_hash=?",[req.username,hash_pw(req.password)])
@@ -72,10 +61,7 @@ def login(req: LoginReq):
     return {"token":create_token(req.username),"username":req.username}
 
 class ChangePwReq(BaseModel):
-    old_password: str
-    new_password: str
-    username: str
-
+    old_password: str; new_password: str; username: str
 @app.post("/api/change-password")
 def change_password(req: ChangePwReq):
     user = query_one("SELECT * FROM users WHERE username=? AND password_hash=?",[req.username,hash_pw(req.old_password)])
@@ -99,43 +85,27 @@ def dashboard():
     """)
     benefice = float(stats['comm_payee']) - float(stats['couts_payes'])
     recent = query("SELECT c.id,c.date,a.nom as acheteur,c.boutique,c.montant_total,c.commission_vendeur_eur,c.technique,c.cout_total,c.statut,c.paiement FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id ORDER BY c.date DESC LIMIT 10")
-    return {
-        "acheteurs":stats['acheteurs'],"commandes":stats['commandes'],
-        "ca":float(stats['ca']),"couts":float(stats['couts']),
-        "a_venir":float(stats['a_venir']),"benefice":benefice,
-        "comm_parrains_due":float(stats['comm_parrains_due']),
-        "pending":int(stats['pending']),"recent":recent
-    }
+    return {"acheteurs":stats['acheteurs'],"commandes":stats['commandes'],"ca":float(stats['ca']),"couts":float(stats['couts']),"a_venir":float(stats['a_venir']),"benefice":benefice,"comm_parrains_due":float(stats['comm_parrains_due']),"pending":int(stats['pending']),"recent":recent}
 
 # ━━━ COÛTS ━━━
 @app.get("/api/couts")
 def get_couts(): return query("SELECT * FROM couts_techniques ORDER BY nom")
-
 class CoutReq(BaseModel):
-    nom: str
-    prix: float
-
+    nom: str; prix: float
 @app.post("/api/couts")
 def set_cout(req: CoutReq):
-    if query_val("SELECT id FROM couts_techniques WHERE nom=?",[req.nom]):
-        run("UPDATE couts_techniques SET prix=? WHERE nom=?",[req.prix,req.nom])
+    if query_val("SELECT id FROM couts_techniques WHERE nom=?",[req.nom]): run("UPDATE couts_techniques SET prix=? WHERE nom=?",[req.prix,req.nom])
     else: run("INSERT INTO couts_techniques (nom,prix) VALUES (?,?)",[req.nom,req.prix])
     return {"ok":True}
-
 @app.delete("/api/couts/{nom}")
-def del_cout(nom: str):
-    run("DELETE FROM couts_techniques WHERE nom=?",[nom])
-    return {"ok":True}
-
+def del_cout(nom: str): run("DELETE FROM couts_techniques WHERE nom=?",[nom]); return {"ok":True}
 def get_prix(nom):
-    v = query_val("SELECT prix FROM couts_techniques WHERE nom=?",[nom])
-    return float(v) if v else 0.0
-
+    v = query_val("SELECT prix FROM couts_techniques WHERE nom=?",[nom]); return float(v) if v else 0.0
 def calc_cout(tech):
     if not tech: return 0.0
     return sum(get_prix(t.strip()) for t in tech.split(",") if t.strip())
 
-# ━━━ ACHETEURS ━━━
+# ━━━ CLIENTS ━━━
 @app.get("/api/acheteurs")
 def get_acheteurs(): return query("SELECT * FROM acheteurs ORDER BY nom")
 
@@ -145,7 +115,6 @@ def get_acheteur(aid: int):
     if not ach: raise HTTPException(404)
     cmds = query("SELECT c.id,c.date,c.boutique,c.montant_total,c.commission_vendeur_eur,c.commission_parrain_eur,c.technique,c.cout_total,c.statut,c.paiement,c.notes FROM commandes c WHERE c.acheteur_id=? ORDER BY c.date DESC",[aid])
     notes = query("SELECT * FROM notes_acheteurs WHERE acheteur_id=? ORDER BY date_creation DESC",[aid])
-    # Parrainage: combien ce parrain a généré
     filleuls_commissions = 0
     if ach['nom']:
         r = query_val("SELECT COALESCE(SUM(c.commission_parrain_eur),0) FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id WHERE a.parrain=?",[ach['nom']])
@@ -153,12 +122,7 @@ def get_acheteur(aid: int):
     return {"acheteur":ach,"commandes":cmds,"notes":notes,"filleuls_commissions":filleuls_commissions}
 
 class AcheteurReq(BaseModel):
-    nom: str
-    parrain: str = "Aucun"
-    commission_parrain: float = 0.0
-    identifiant_boutique: str = ""
-    mdp_boutique: str = ""
-
+    nom: str; parrain: str = "Aucun"; commission_parrain: float = 0.0; identifiant_boutique: str = ""; mdp_boutique: str = ""
 @app.post("/api/acheteurs")
 def add_acheteur(req: AcheteurReq):
     try:
@@ -175,6 +139,16 @@ def mod_acheteur(aid: int, req: AcheteurReq):
         return {"ok":True}
     except: raise HTTPException(400,"Ce nom existe déjà")
 
+# Update identifiants on existing client
+@app.put("/api/acheteurs/{aid}/identifiants")
+def update_identifiants(aid: int, req: AcheteurReq):
+    ach = query_one("SELECT * FROM acheteurs WHERE id=?",[aid])
+    if not ach: raise HTTPException(404)
+    new_ident = req.identifiant_boutique.strip() or ach['identifiant_boutique']
+    new_mdp = req.mdp_boutique.strip() or ach['mdp_boutique']
+    run("UPDATE acheteurs SET identifiant_boutique=?,mdp_boutique=? WHERE id=?",[new_ident,new_mdp,aid])
+    return {"ok":True}
+
 @app.delete("/api/acheteurs/{aid}")
 def del_acheteur(aid: int):
     run("DELETE FROM notes_acheteurs WHERE acheteur_id=?",[aid])
@@ -184,18 +158,13 @@ def del_acheteur(aid: int):
 
 # ━━━ NOTES ━━━
 class NoteReq(BaseModel):
-    contenu: str
-    auteur: str = "admin"
-
+    contenu: str; auteur: str = "admin"
 @app.post("/api/acheteurs/{aid}/notes")
 def add_note(aid: int, req: NoteReq):
     run("INSERT INTO notes_acheteurs (acheteur_id,contenu,date_creation,auteur) VALUES (?,?,?,?)",[aid,req.contenu.strip(),now(),req.auteur])
     return {"ok":True}
-
 @app.delete("/api/notes/{nid}")
-def del_note(nid: int):
-    run("DELETE FROM notes_acheteurs WHERE id=?",[nid])
-    return {"ok":True}
+def del_note(nid: int): run("DELETE FROM notes_acheteurs WHERE id=?",[nid]); return {"ok":True}
 
 # ━━━ COMMANDES ━━━
 def get_or_create_ach(nom, ident="", mdp=""):
@@ -223,18 +192,10 @@ def get_commandes():
         FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id ORDER BY c.date DESC""")
 
 class CommandeReq(BaseModel):
-    acheteur_nom: str
-    boutique: str
-    montant_total: float
-    commission_mode: str = "pct"
-    commission_pct: float = 0.0
-    commission_eur: float = 0.0
-    notes: str = ""
-    statut: str = "En cours"
-    paiement: str = "Non payée"
-    technique: str = ""
-    identifiant: str = ""
-    mdp: str = ""
+    acheteur_nom: str; boutique: str; montant_total: float
+    commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
+    notes: str = ""; statut: str = "En cours"; paiement: str = "Non payée"; technique: str = ""
+    identifiant: str = ""; mdp: str = ""
 
 @app.post("/api/commandes")
 def add_commande(req: CommandeReq):
@@ -247,15 +208,9 @@ def add_commande(req: CommandeReq):
     return {"ok":True,"commission":cv,"cout":cout,"parrain_commission":cp}
 
 class CommandeEditReq(BaseModel):
-    boutique: str
-    montant_total: float
-    commission_mode: str = "pct"
-    commission_pct: float = 0.0
-    commission_eur: float = 0.0
-    notes: str = ""
-    statut: str = "En cours"
-    paiement: str = "Non payée"
-    technique: str = ""
+    boutique: str; montant_total: float
+    commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
+    notes: str = ""; statut: str = "En cours"; paiement: str = "Non payée"; technique: str = ""
 
 @app.put("/api/commandes/{cid}")
 def mod_commande(cid: int, req: CommandeEditReq):
@@ -266,21 +221,24 @@ def mod_commande(cid: int, req: CommandeEditReq):
     cout = calc_cout(req.technique)
     run("UPDATE commandes SET boutique=?,montant_total=?,commission_mode=?,commission_vendeur_pct=?,commission_vendeur_eur=?,commission_parrain_eur=?,notes=?,statut=?,paiement=?,technique=?,cout_total=? WHERE id=?",
         [req.boutique.strip(),req.montant_total,req.commission_mode,pf,cv,cp,req.notes.strip(),req.statut,req.paiement,req.technique,cout,cid])
-    return {"ok":True,"commission":cv,"cout":cout}
+    return {"ok":True}
+
+# Toggle paiement en 1 clic
+@app.post("/api/commandes/{cid}/toggle-paiement")
+def toggle_paiement(cid: int):
+    current = query_val("SELECT paiement FROM commandes WHERE id=?",[cid])
+    if current is None: raise HTTPException(404)
+    new_val = "Payée" if current != "Payée" else "Non payée"
+    run("UPDATE commandes SET paiement=? WHERE id=?",[new_val,cid])
+    return {"ok":True,"paiement":new_val}
 
 @app.delete("/api/commandes/{cid}")
-def del_commande(cid: int):
-    run("DELETE FROM commandes WHERE id=?",[cid])
-    return {"ok":True}
+def del_commande(cid: int): run("DELETE FROM commandes WHERE id=?",[cid]); return {"ok":True}
 
 # ━━━ DEMANDES ━━━
 class DemandeReq(BaseModel):
-    nom_client: str
-    boutique: str
-    montant: float
-    identifiant_boutique: str = ""
-    mdp_boutique: str = ""
-    notes_client: str = ""
+    nom_client: str; boutique: str; montant: float
+    identifiant_boutique: str = ""; mdp_boutique: str = ""; notes_client: str = ""
 
 @app.post("/api/demandes/submit")
 def submit_demande(req: DemandeReq):
@@ -294,30 +252,37 @@ def get_demandes(statut: Optional[str] = None):
     return query("SELECT * FROM demandes ORDER BY date_soumission DESC")
 
 class ValiderReq(BaseModel):
-    commission_mode: str = "pct"
-    commission_pct: float = 0.0
-    commission_eur: float = 0.0
-    technique: str = ""
-    notes_admin: str = ""
+    commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
+    technique: str = ""; notes_admin: str = ""
+    client_id: Optional[int] = None  # Pour relier à un client existant
 
 @app.post("/api/demandes/{did}/valider")
 def valider_demande(did: int, req: ValiderReq):
     dem = query_one("SELECT * FROM demandes WHERE id=?",[did])
     if not dem: raise HTTPException(404)
     notes = f"{dem['notes_client']} | {req.notes_admin}".strip(" | ")
-    aid = get_or_create_ach(dem['nom_client'], dem['identifiant_boutique'], dem['mdp_boutique'])
+    
+    # Si un client_id est fourni, on relie à ce client et on met à jour ses identifiants
+    if req.client_id:
+        aid = req.client_id
+        # Mettre à jour les identifiants si fournis par le formulaire
+        if dem['identifiant_boutique']:
+            run("UPDATE acheteurs SET identifiant_boutique=? WHERE id=?",[dem['identifiant_boutique'],aid])
+        if dem['mdp_boutique']:
+            run("UPDATE acheteurs SET mdp_boutique=? WHERE id=?",[dem['mdp_boutique'],aid])
+    else:
+        aid = get_or_create_ach(dem['nom_client'], dem['identifiant_boutique'], dem['mdp_boutique'])
+    
     ach = query_one("SELECT * FROM acheteurs WHERE id=?",[aid])
     cv,cp,pf = calc_comm(dem['montant'], req.commission_mode, req.commission_pct, req.commission_eur, ach['parrain'], ach['commission_parrain'])
     cout = calc_cout(req.technique)
     run("""INSERT INTO commandes (date,acheteur_id,boutique,montant_total,commission_mode,commission_vendeur_pct,commission_vendeur_eur,commission_parrain_eur,notes,statut,paiement,technique,cout_total) VALUES (?,?,?,?,?,?,?,?,?,'Validée','Non payée',?,?)""",
         [now(),aid,dem['boutique'],dem['montant'],req.commission_mode,pf,cv,cp,notes,req.technique,cout])
     run("UPDATE demandes SET statut='Validée' WHERE id=?",[did])
-    return {"ok":True,"commission":cv,"cout":cout,"parrain_commission":cp}
+    return {"ok":True,"commission":cv,"cout":cout}
 
 @app.post("/api/demandes/{did}/rejeter")
-def rejeter_demande(did: int):
-    run("UPDATE demandes SET statut='Rejetée' WHERE id=?",[did])
-    return {"ok":True}
+def rejeter_demande(did: int): run("UPDATE demandes SET statut='Rejetée' WHERE id=?",[did]); return {"ok":True}
 
 # ━━━ FINANCES ━━━
 @app.get("/api/finances")
@@ -348,6 +313,5 @@ def get_techniques(): return TECHNIQUES
 # ━━━ RESET ━━━
 @app.post("/api/reset")
 def reset_all():
-    for t in ["commandes","acheteurs","notes_acheteurs","demandes","objectifs"]:
-        run(f"DELETE FROM {t}")
+    for t in ["commandes","acheteurs","notes_acheteurs","demandes","objectifs"]: run(f"DELETE FROM {t}")
     return {"ok":True}
