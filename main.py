@@ -92,19 +92,23 @@ def change_password(req: ChangePwReq):
 # ━━━ DASHBOARD ━━━
 @app.get("/api/dashboard")
 def dashboard():
-    acheteurs = query_val("SELECT COUNT(*) FROM acheteurs") or 0
-    commandes = query_val("SELECT COUNT(*) FROM commandes") or 0
-    ca = query_val("SELECT COALESCE(SUM(montant_total),0) FROM commandes") or 0
-    couts = query_val("SELECT COALESCE(SUM(cout_total),0) FROM commandes") or 0
-    comm_en_cours = query_val("SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut IN ('En cours','Livrée')") or 0
-    couts_en_cours = query_val("SELECT COALESCE(SUM(cout_total),0) FROM commandes WHERE statut IN ('En cours','Livrée')") or 0
-    net_a_venir = float(comm_en_cours) - float(couts_en_cours)
-    recu = query_val("SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut='Validée'") or 0
-    pending = query_val("SELECT COUNT(*) FROM demandes WHERE statut='En attente'") or 0
+    # Une seule requête pour tous les KPIs
+    stats = query_one("""SELECT 
+        (SELECT COUNT(*) FROM acheteurs) as acheteurs,
+        (SELECT COUNT(*) FROM commandes) as commandes,
+        (SELECT COALESCE(SUM(montant_total),0) FROM commandes) as ca,
+        (SELECT COALESCE(SUM(cout_total),0) FROM commandes) as couts,
+        (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut IN ('En cours','Livrée')) as comm_en_cours,
+        (SELECT COALESCE(SUM(cout_total),0) FROM commandes WHERE statut IN ('En cours','Livrée')) as couts_en_cours,
+        (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut='Validée') as recu,
+        (SELECT COUNT(*) FROM demandes WHERE statut='En attente') as pending
+    """)
     recent = query("SELECT c.id,c.date,a.nom as acheteur,c.boutique,c.montant_total,c.commission_vendeur_eur,c.technique,c.cout_total,c.statut FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id ORDER BY c.date DESC LIMIT 10")
     return {
-        "acheteurs": acheteurs, "commandes": commandes, "ca": float(ca), "couts": float(couts),
-        "net_a_venir": net_a_venir, "recu": float(recu), "pending": int(pending), "recent": recent
+        "acheteurs": stats['acheteurs'], "commandes": stats['commandes'], 
+        "ca": float(stats['ca']), "couts": float(stats['couts']),
+        "net_a_venir": float(stats['comm_en_cours']) - float(stats['couts_en_cours']), 
+        "recu": float(stats['recu']), "pending": int(stats['pending']), "recent": recent
     }
 
 # ━━━ COÛTS TECHNIQUES ━━━
