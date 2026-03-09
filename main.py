@@ -18,19 +18,13 @@ app = FastAPI(title="SalesFlow API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # ━━━ DB ━━━
-def db():
-    return libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
+_client = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
 
 def run(sql, params=None):
-    c = db()
-    rs = c.execute(sql, params or [])
-    c.close()
-    return rs
+    return _client.execute(sql, params or [])
 
 def query(sql, params=None):
-    c = db()
-    rs = c.execute(sql, params or [])
-    c.close()
+    rs = _client.execute(sql, params or [])
     if not rs.columns: return []
     return [dict(zip(rs.columns, row)) for row in rs.rows]
 
@@ -39,9 +33,7 @@ def query_one(sql, params=None):
     return rows[0] if rows else None
 
 def query_val(sql, params=None):
-    c = db()
-    rs = c.execute(sql, params or [])
-    c.close()
+    rs = _client.execute(sql, params or [])
     return rs.rows[0][0] if rs.rows else None
 
 # ━━━ INIT ━━━
