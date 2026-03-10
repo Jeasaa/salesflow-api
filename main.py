@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -16,7 +16,6 @@ app = FastAPI(title="SalesFlow API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 _client = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
-
 def run(sql, params=None): return _client.execute(sql, params or [])
 def query(sql, params=None):
     rs = _client.execute(sql, params or [])
@@ -37,6 +36,8 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS objectifs (id INTEGER PRIMARY KEY AUTOINCREMENT,mois TEXT NOT NULL UNIQUE,objectif_ca REAL DEFAULT 0.0,objectif_commandes INTEGER DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS demandes (id INTEGER PRIMARY KEY AUTOINCREMENT,date_soumission TEXT,nom_client TEXT NOT NULL,boutique TEXT NOT NULL,montant REAL NOT NULL,identifiant_boutique TEXT DEFAULT '',mdp_boutique TEXT DEFAULT '',notes_client TEXT DEFAULT '',statut TEXT DEFAULT 'En attente')",
         "CREATE TABLE IF NOT EXISTS couts_techniques (id INTEGER PRIMARY KEY AUTOINCREMENT,nom TEXT NOT NULL UNIQUE,prix REAL NOT NULL DEFAULT 0.0)",
+        "CREATE TABLE IF NOT EXISTS parrain_transactions (id INTEGER PRIMARY KEY AUTOINCREMENT,parrain_nom TEXT NOT NULL,montant REAL NOT NULL,description TEXT DEFAULT '',date TEXT,type TEXT DEFAULT 'prime')",
+        "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT)",
     ]
     for t in tables:
         try: run(t)
@@ -46,6 +47,9 @@ def init_db():
     if query_val("SELECT COUNT(*) FROM users") == 0:
         run("INSERT INTO users (username,password_hash,role,created_at) VALUES (?,?,?,?)",
             ["admin", hashlib.sha256("admin".encode()).hexdigest(), "admin", now()])
+    # Default theme
+    try: run("INSERT INTO settings (key,value) VALUES ('theme','dark')")
+    except: pass
 init_db()
 
 # ━━━ AUTH ━━━
@@ -69,23 +73,43 @@ def change_password(req: ChangePwReq):
     run("UPDATE users SET password_hash=? WHERE username=?",[hash_pw(req.new_password),req.username])
     return {"ok":True}
 
+# ━━━ SETTINGS ━━━
+@app.get("/api/settings")
+def get_settings():
+    rows = query("SELECT * FROM settings")
+    return {r['key']:r['value'] for r in rows}
+
+class SettingReq(BaseModel):
+    key: str; value: str
+@app.post("/api/settings")
+def set_setting(req: SettingReq):
+    if query_val("SELECT key FROM settings WHERE key=?",[req.key]):
+        run("UPDATE settings SET value=? WHERE key=?",[req.value,req.key])
+    else: run("INSERT INTO settings (key,value) VALUES (?,?)",[req.key,req.value])
+    return {"ok":True}
+
 # ━━━ DASHBOARD ━━━
 @app.get("/api/dashboard")
 def dashboard():
     stats = query_one("""SELECT
-        (SELECT COUNT(*) FROM acheteurs) as acheteurs,
+        (SELECT COUNT(*) FROM acheteurs) as clients,
         (SELECT COUNT(*) FROM commandes) as commandes,
-        (SELECT COALESCE(SUM(montant_total),0) FROM commandes) as ca,
-        (SELECT COALESCE(SUM(cout_total),0) FROM commandes) as couts,
-        (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut='Validée' AND paiement='Non payée') as a_venir,
+        (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut='En cours') as comm_en_cours,
+        (SELECT COALESCE(SUM(cout_total),0) FROM commandes WHERE statut='En cours') as couts_en_cours,
+        (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE statut='Validée' AND paiement='Non payée') as en_attente_paiement,
         (SELECT COALESCE(SUM(commission_vendeur_eur),0) FROM commandes WHERE paiement='Payée') as comm_payee,
         (SELECT COALESCE(SUM(cout_total),0) FROM commandes WHERE paiement='Payée') as couts_payes,
-        (SELECT COALESCE(SUM(commission_parrain_eur),0) FROM commandes WHERE statut='Validée' OR paiement='Payée') as comm_parrains_due,
         (SELECT COUNT(*) FROM demandes WHERE statut='En attente') as pending
     """)
     benefice = float(stats['comm_payee']) - float(stats['couts_payes'])
+    comm_en_cours_net = float(stats['comm_en_cours']) - float(stats['couts_en_cours'])
     recent = query("SELECT c.id,c.date,a.nom as acheteur,c.boutique,c.montant_total,c.commission_vendeur_eur,c.technique,c.cout_total,c.statut,c.paiement FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id ORDER BY c.date DESC LIMIT 10")
-    return {"acheteurs":stats['acheteurs'],"commandes":stats['commandes'],"ca":float(stats['ca']),"couts":float(stats['couts']),"a_venir":float(stats['a_venir']),"benefice":benefice,"comm_parrains_due":float(stats['comm_parrains_due']),"pending":int(stats['pending']),"recent":recent}
+    return {
+        "clients":stats['clients'],"commandes":stats['commandes'],
+        "comm_en_cours":comm_en_cours_net,
+        "en_attente_paiement":float(stats['en_attente_paiement']),
+        "benefice":benefice,"pending":int(stats['pending']),"recent":recent
+    }
 
 # ━━━ COÛTS ━━━
 @app.get("/api/couts")
@@ -130,7 +154,6 @@ def add_acheteur(req: AcheteurReq):
             [req.nom.strip(),req.parrain.strip() or "Aucun",req.commission_parrain,req.identifiant_boutique.strip(),req.mdp_boutique.strip(),now()])
         return {"ok":True}
     except: raise HTTPException(400,"Ce nom existe déjà")
-
 @app.put("/api/acheteurs/{aid}")
 def mod_acheteur(aid: int, req: AcheteurReq):
     try:
@@ -138,17 +161,6 @@ def mod_acheteur(aid: int, req: AcheteurReq):
             [req.nom.strip(),req.parrain.strip() or "Aucun",req.commission_parrain,req.identifiant_boutique.strip(),req.mdp_boutique.strip(),aid])
         return {"ok":True}
     except: raise HTTPException(400,"Ce nom existe déjà")
-
-# Update identifiants on existing client
-@app.put("/api/acheteurs/{aid}/identifiants")
-def update_identifiants(aid: int, req: AcheteurReq):
-    ach = query_one("SELECT * FROM acheteurs WHERE id=?",[aid])
-    if not ach: raise HTTPException(404)
-    new_ident = req.identifiant_boutique.strip() or ach['identifiant_boutique']
-    new_mdp = req.mdp_boutique.strip() or ach['mdp_boutique']
-    run("UPDATE acheteurs SET identifiant_boutique=?,mdp_boutique=? WHERE id=?",[new_ident,new_mdp,aid])
-    return {"ok":True}
-
 @app.delete("/api/acheteurs/{aid}")
 def del_acheteur(aid: int):
     run("DELETE FROM notes_acheteurs WHERE acheteur_id=?",[aid])
@@ -180,7 +192,7 @@ def get_or_create_ach(nom, ident="", mdp=""):
 def calc_comm(mont, mode, pct, eur, parrain, cp):
     if mode == "pct": cv=mont*(pct/100); pf=pct
     else: cv=eur; pf=(eur/mont*100) if mont>0 else 0
-    cpar = cv*(cp/100) if parrain != "Aucun" and cp > 0 else 0
+    cpar = mont*(cp/100) if parrain != "Aucun" and cp > 0 else 0
     return cv, cpar, pf
 
 @app.get("/api/commandes")
@@ -196,7 +208,6 @@ class CommandeReq(BaseModel):
     commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
     notes: str = ""; statut: str = "En cours"; paiement: str = "Non payée"; technique: str = ""
     identifiant: str = ""; mdp: str = ""
-
 @app.post("/api/commandes")
 def add_commande(req: CommandeReq):
     aid = get_or_create_ach(req.acheteur_nom, req.identifiant, req.mdp)
@@ -205,13 +216,12 @@ def add_commande(req: CommandeReq):
     cout = calc_cout(req.technique)
     run("""INSERT INTO commandes (date,acheteur_id,boutique,montant_total,commission_mode,commission_vendeur_pct,commission_vendeur_eur,commission_parrain_eur,notes,statut,paiement,technique,cout_total) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         [now(),aid,req.boutique.strip(),req.montant_total,req.commission_mode,pf,cv,cp,req.notes.strip(),req.statut,req.paiement,req.technique,cout])
-    return {"ok":True,"commission":cv,"cout":cout,"parrain_commission":cp}
+    return {"ok":True,"commission":cv,"cout":cout}
 
 class CommandeEditReq(BaseModel):
     boutique: str; montant_total: float
     commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
     notes: str = ""; statut: str = "En cours"; paiement: str = "Non payée"; technique: str = ""
-
 @app.put("/api/commandes/{cid}")
 def mod_commande(cid: int, req: CommandeEditReq):
     aid = query_val("SELECT acheteur_id FROM commandes WHERE id=?",[cid])
@@ -223,7 +233,6 @@ def mod_commande(cid: int, req: CommandeEditReq):
         [req.boutique.strip(),req.montant_total,req.commission_mode,pf,cv,cp,req.notes.strip(),req.statut,req.paiement,req.technique,cout,cid])
     return {"ok":True}
 
-# Toggle paiement en 1 clic
 @app.post("/api/commandes/{cid}/toggle-paiement")
 def toggle_paiement(cid: int):
     current = query_val("SELECT paiement FROM commandes WHERE id=?",[cid])
@@ -239,13 +248,11 @@ def del_commande(cid: int): run("DELETE FROM commandes WHERE id=?",[cid]); retur
 class DemandeReq(BaseModel):
     nom_client: str; boutique: str; montant: float
     identifiant_boutique: str = ""; mdp_boutique: str = ""; notes_client: str = ""
-
 @app.post("/api/demandes/submit")
 def submit_demande(req: DemandeReq):
     run("INSERT INTO demandes (date_soumission,nom_client,boutique,montant,identifiant_boutique,mdp_boutique,notes_client,statut) VALUES (?,?,?,?,?,?,?,'En attente')",
         [now(),req.nom_client.strip(),req.boutique.strip(),req.montant,req.identifiant_boutique.strip(),req.mdp_boutique.strip(),req.notes_client.strip()])
     return {"ok":True}
-
 @app.get("/api/demandes")
 def get_demandes(statut: Optional[str] = None):
     if statut: return query("SELECT * FROM demandes WHERE statut=? ORDER BY date_soumission DESC",[statut])
@@ -253,26 +260,18 @@ def get_demandes(statut: Optional[str] = None):
 
 class ValiderReq(BaseModel):
     commission_mode: str = "pct"; commission_pct: float = 0.0; commission_eur: float = 0.0
-    technique: str = ""; notes_admin: str = ""
-    client_id: Optional[int] = None  # Pour relier à un client existant
-
+    technique: str = ""; notes_admin: str = ""; client_id: Optional[int] = None
 @app.post("/api/demandes/{did}/valider")
 def valider_demande(did: int, req: ValiderReq):
     dem = query_one("SELECT * FROM demandes WHERE id=?",[did])
     if not dem: raise HTTPException(404)
     notes = f"{dem['notes_client']} | {req.notes_admin}".strip(" | ")
-    
-    # Si un client_id est fourni, on relie à ce client et on met à jour ses identifiants
     if req.client_id:
         aid = req.client_id
-        # Mettre à jour les identifiants si fournis par le formulaire
-        if dem['identifiant_boutique']:
-            run("UPDATE acheteurs SET identifiant_boutique=? WHERE id=?",[dem['identifiant_boutique'],aid])
-        if dem['mdp_boutique']:
-            run("UPDATE acheteurs SET mdp_boutique=? WHERE id=?",[dem['mdp_boutique'],aid])
+        if dem['identifiant_boutique']: run("UPDATE acheteurs SET identifiant_boutique=? WHERE id=?",[dem['identifiant_boutique'],aid])
+        if dem['mdp_boutique']: run("UPDATE acheteurs SET mdp_boutique=? WHERE id=?",[dem['mdp_boutique'],aid])
     else:
         aid = get_or_create_ach(dem['nom_client'], dem['identifiant_boutique'], dem['mdp_boutique'])
-    
     ach = query_one("SELECT * FROM acheteurs WHERE id=?",[aid])
     cv,cp,pf = calc_comm(dem['montant'], req.commission_mode, req.commission_pct, req.commission_eur, ach['parrain'], ach['commission_parrain'])
     cout = calc_cout(req.technique)
@@ -284,20 +283,49 @@ def valider_demande(did: int, req: ValiderReq):
 @app.post("/api/demandes/{did}/rejeter")
 def rejeter_demande(did: int): run("UPDATE demandes SET statut='Rejetée' WHERE id=?",[did]); return {"ok":True}
 
+# ━━━ PARRAINS ━━━
+@app.get("/api/parrains")
+def get_parrains():
+    parrains = query("""SELECT a.parrain as parrain, COUNT(DISTINCT a.nom) as filleuls, COUNT(c.id) as commandes,
+        COALESCE(SUM(c.montant_total),0) as ca, COALESCE(SUM(c.commission_parrain_eur),0) as comm_auto,
+        COALESCE(SUM(CASE WHEN c.paiement='Payée' THEN c.commission_parrain_eur ELSE 0 END),0) as comm_auto_payee
+        FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id WHERE a.parrain != 'Aucun'
+        GROUP BY a.parrain ORDER BY comm_auto DESC""")
+    # Ajouter les transactions manuelles
+    for p in parrains:
+        manual = query_val("SELECT COALESCE(SUM(montant),0) FROM parrain_transactions WHERE parrain_nom=?",[p['parrain']])
+        p['transactions_manuelles'] = float(manual) if manual else 0
+        p['total_du'] = p['comm_auto'] + p['transactions_manuelles']
+    return parrains
+
+@app.get("/api/parrains/{nom}/transactions")
+def get_parrain_transactions(nom: str):
+    auto = query("SELECT c.id,c.date,a.nom as client,c.boutique,c.montant_total,c.commission_parrain_eur as montant,'auto' as type FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id WHERE a.parrain=? ORDER BY c.date DESC",[nom])
+    manual = query("SELECT id,date,description as client,'' as boutique,0 as montant_total,montant,'prime' as type FROM parrain_transactions WHERE parrain_nom=? ORDER BY date DESC",[nom])
+    return {"auto":auto,"manual":manual}
+
+class ParrainTransReq(BaseModel):
+    parrain_nom: str; montant: float; description: str = ""
+@app.post("/api/parrains/transaction")
+def add_parrain_transaction(req: ParrainTransReq):
+    run("INSERT INTO parrain_transactions (parrain_nom,montant,description,date,type) VALUES (?,?,?,?,'prime')",
+        [req.parrain_nom.strip(),req.montant,req.description.strip(),now()])
+    return {"ok":True}
+
+@app.delete("/api/parrains/transaction/{tid}")
+def del_parrain_transaction(tid: int):
+    run("DELETE FROM parrain_transactions WHERE id=?",[tid])
+    return {"ok":True}
+
 # ━━━ FINANCES ━━━
 @app.get("/api/finances")
 def get_finances():
-    parrains = query("""SELECT a.parrain as parrain, COUNT(DISTINCT a.nom) as filleuls, COUNT(c.id) as commandes,
-        COALESCE(SUM(c.montant_total),0) as ca, COALESCE(SUM(c.commission_parrain_eur),0) as comm_due,
-        COALESCE(SUM(CASE WHEN c.paiement='Payée' THEN c.commission_parrain_eur ELSE 0 END),0) as comm_payee
-        FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id WHERE a.parrain != 'Aucun'
-        GROUP BY a.parrain ORDER BY comm_due DESC""")
     boutiques = query("""SELECT c.boutique, COUNT(c.id) as commandes, COALESCE(SUM(c.montant_total),0) as ca,
         COALESCE(SUM(c.commission_vendeur_eur),0) as commission, COALESCE(SUM(c.cout_total),0) as couts
         FROM commandes c GROUP BY c.boutique ORDER BY commission DESC""")
     non_payees = query("""SELECT c.id,c.date,a.nom as acheteur,c.boutique,c.montant_total,c.commission_vendeur_eur,c.statut
         FROM commandes c JOIN acheteurs a ON c.acheteur_id=a.id WHERE c.statut='Validée' AND c.paiement='Non payée' ORDER BY c.date DESC""")
-    return {"parrains":parrains,"boutiques":boutiques,"non_payees":non_payees}
+    return {"boutiques":boutiques,"non_payees":non_payees}
 
 # ━━━ SEARCH ━━━
 @app.get("/api/search")
@@ -313,5 +341,5 @@ def get_techniques(): return TECHNIQUES
 # ━━━ RESET ━━━
 @app.post("/api/reset")
 def reset_all():
-    for t in ["commandes","acheteurs","notes_acheteurs","demandes","objectifs"]: run(f"DELETE FROM {t}")
+    for t in ["commandes","acheteurs","notes_acheteurs","demandes","objectifs","parrain_transactions"]: run(f"DELETE FROM {t}")
     return {"ok":True}
