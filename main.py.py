@@ -337,7 +337,7 @@ def search(q: str):
 
 @app.get("/api/techniques")
 def get_techniques(): return TECHNIQUES
-
+    
 # ━━━ ANALYTICS ━━━
 @app.get("/api/analytics/ca-trend")
 def analytics_ca_trend():
@@ -392,6 +392,43 @@ def analytics_statut():
         FROM commandes c
         GROUP BY c.statut, c.paiement
     """)
+
+@app.get("/api/analytics/commissions-evolution")
+def analytics_commissions_evolution():
+    data = query("""
+        SELECT
+            strftime('%Y-%m', date) as mois,
+            COALESCE(SUM(CASE WHEN statut='En cours' THEN commission_vendeur_eur ELSE 0 END), 0) as comm_en_cours,
+            COALESCE(SUM(CASE WHEN statut='Validée' THEN commission_vendeur_eur ELSE 0 END), 0) as comm_validee,
+            COUNT(CASE WHEN statut='En cours' THEN 1 END) as nb_en_cours,
+            COUNT(CASE WHEN statut='Validée' THEN 1 END) as nb_validee
+        FROM commandes
+        WHERE date IS NOT NULL
+        GROUP BY strftime('%Y-%m', date)
+        ORDER BY mois DESC
+        LIMIT 12
+    """)
+    return sorted(data, key=lambda x: x['mois'])
+
+@app.get("/api/analytics/boutiques")
+def analytics_boutiques():
+    data = query("""
+        SELECT
+            boutique,
+            COUNT(*) as commandes,
+            COALESCE(SUM(montant_total), 0) as ca,
+            COALESCE(SUM(commission_vendeur_eur), 0) as commissions,
+            COUNT(CASE WHEN statut='Validée' THEN 1 END) as validees,
+            COUNT(CASE WHEN statut='En cours' THEN 1 END) as en_cours
+        FROM commandes
+        WHERE boutique IS NOT NULL AND boutique != ''
+        GROUP BY boutique
+        ORDER BY commandes DESC
+    """)
+    total = sum(d['commandes'] for d in data)
+    for d in data:
+        d['pct'] = round(d['commandes'] / total * 100, 1) if total > 0 else 0
+    return data
 
 # ━━━ RESET ━━━
 @app.post("/api/reset")
